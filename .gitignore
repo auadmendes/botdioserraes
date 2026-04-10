@@ -1,0 +1,22 @@
+# Credenciais e Segredos
+.env
+
+# Pastas de ambiente virtual
+venv/
+.venv/
+env/
+
+# Python (arquivos temporários)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Arquivos do projeto (PDFs baixados pelo scraper)
+diario_*.pdf
+
+# Banco de dados local (se houver)
+*.db
+
+# Configurações de IDE
+.vscode/
+.idea/
