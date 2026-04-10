@@ -80,7 +80,7 @@ def ja_foi_notificado(chat_id, link):
     return False
 
 
-#Resumo
+# Funções para salvar e buscar resumos diários no banco
 def salvar_resumo_no_banco(data_str, texto_resumo):
     """Guarda o resumo do dia no MongoDB"""
     # 'data_str' deve vir no formato '09/04/2026'
@@ -95,7 +95,7 @@ def buscar_resumo_por_data(data_str):
     resultado = db.resumos.find_one({"data": data_str})
     return resultado['texto'] if resultado else None
 
-#line
+# Função para pegar as últimas datas que possuem resumos (para evitar erros de data)
 def get_ultimas_datas_resumo(limite=5):
     """Retorna as últimas datas que possuem resumo salvo, em ordem decrescente"""
     # Buscamos todos os resumos, ordenamos pelo ID (que no Mongo reflete a ordem de criação)
@@ -103,6 +103,8 @@ def get_ultimas_datas_resumo(limite=5):
     # Como as datas são strings 'DD/MM/AAAA', vamos pegar as mais recentes inseridas:
     cursor = db.resumos.find({}, {"data": 1}).sort("_id", -1).limit(limite)
     return [doc['data'] for doc in cursor]
+
 #line
+
 #line
 

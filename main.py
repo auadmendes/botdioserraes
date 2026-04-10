@@ -10,7 +10,10 @@ from dotenv import load_dotenv
 # Importações do seu projeto
 from src.database import (
     add_term, remove_term, get_all_subscriptions, 
-    ja_foi_notificado, get_user_terms, get_admin_stats
+    ja_foi_notificado, get_user_terms, get_admin_stats,
+    salvar_resumo_no_banco, 
+    buscar_resumo_por_data,    # <--- ADICIONE ESTA
+    get_ultimas_datas_resumo   # <--- ADICIONE ESTA TAMBÉM
 )
 from src.scraper import check_term_ioes, capturar_e_baixar_diario
 from src.ia_analyst import gerar_resumo_diario
@@ -128,6 +131,44 @@ async def tarefa_resumo_diario(app):
             os.remove(caminho_pdf)
     logging.info("✅ Resumo diário finalizado.")
 
+# --- FUNÇÕES AUXILIARES ---
+async def consultar_resumo(update, context):
+    """
+    Comando /resumo [data]
+    Exemplo: /resumo 09/04/2026
+    """
+    # Pega o argumento enviado após o comando
+    args = context.args
+    
+    if not args:
+        # Se o usuário não digitar a data, podemos mostrar as últimas datas disponíveis
+        ultimas = get_ultimas_datas_resumo(5)
+        datas_str = "\n".join([f"• `/resumo {d}`" for d in ultimas])
+        
+        msg = (
+            "⚠️ **Por favor, informe uma data.**\n\n"
+            "Exemplo: `/resumo 10/04/2026`\n\n"
+            f"📅 **Últimos resumos disponíveis:**\n{datas_str}"
+        )
+        await update.message.reply_text(msg, parse_mode='Markdown')
+        return
+
+    data_pedida = args[0].strip()
+    
+    # Busca no banco de dados usando sua função existente
+    resumo = buscar_resumo_por_data(data_pedida)
+    
+    if resumo:
+        # Envia o resumo encontrado (removendo parse_mode para evitar erros de caracteres)
+        await update.message.reply_text(
+            f"📅 **RESUMO DE {data_pedida}:**\n\n{resumo}"
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Não encontrei nenhum resumo para a data **{data_pedida}**.\n"
+            "Verifique se o formato é DD/MM/AAAA.",
+            parse_mode='Markdown'
+        )
 # --- INICIALIZAÇÃO ---
 
 async def post_init(application):
@@ -136,6 +177,7 @@ async def post_init(application):
         BotCommand("monitorar", "Vigiar um nome"),
         BotCommand("meustermos", "Ver meus nomes"),
         BotCommand("remover", "Parar de vigiar"),
+        BotCommand("resumo", "Buscar resumo por data"),
         BotCommand("som", "Testar som"),
         BotCommand("stats", "Admin Stats")
     ])
@@ -156,6 +198,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("monitorar", monitorar))
     app.add_handler(CommandHandler("meustermos", meus_termos))
+    app.add_handler(CommandHandler("resumo", consultar_resumo))
     app.add_handler(CommandHandler("remover", remover))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("som", som))
