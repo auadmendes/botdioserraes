@@ -5,6 +5,9 @@ from datetime import datetime
 from telegram import BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from src.scraper_pmv import buscar_vitoria_completo
+
+
 from dotenv import load_dotenv
 
 # Importações do seu projeto
@@ -15,7 +18,7 @@ from src.database import (
     buscar_resumo_por_data,    # <--- ADICIONE ESTA
     get_ultimas_datas_resumo   # <--- ADICIONE ESTA TAMBÉM
 )
-from src.scraper import check_term_ioes, capturar_e_baixar_diario
+from src.scraper import check_term_ioes, capturar_e_baixar_diario, check_term_vitoria
 from src.ia_analyst import gerar_resumo_diario
 
 load_dotenv()
@@ -86,20 +89,76 @@ async def stats(update, context):
 
 # --- TAREFAS AGENDADAS (JOBS) ---
 
-async def tarefa_de_busca(app):
-    """Busca os nomes específicos de cada usuário"""
-    logging.info("🔎 Iniciando busca de termos...")
+# async def tarefa_de_busca(app):
+#     """Busca os nomes específicos de cada usuário"""
+#     logging.info("🔎 Iniciando busca de termos...")
+#     subs = get_all_subscriptions()
+#     for sub in subs:
+#         chat_id = sub['chat_id']
+#         for term in sub['terms']:
+#             resultados = await check_term_ioes(term)
+#             if isinstance(resultados, list):
+#                 for item in resultados:
+#                     if not ja_foi_notificado(chat_id, item['link']):
+#                         msg = (f"🔔 **Resultado Encontrado!**\n\n👤 Termo: {term}\n📄 Página: {item['pagina']}\n🔗 [Abrir Diário]({item['link']})")
+#                         await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+#     logging.info("✅ Busca de termos finalizada.")
+
+
+# --- TAREFA ESPECÍFICA: SERRA ---
+async def tarefa_busca_serra(app):
+    logging.info("🔎 [SERRA] Iniciando busca de termos...")
     subs = get_all_subscriptions()
     for sub in subs:
         chat_id = sub['chat_id']
         for term in sub['terms']:
             resultados = await check_term_ioes(term)
-            if isinstance(resultados, list):
-                for item in resultados:
-                    if not ja_foi_notificado(chat_id, item['link']):
-                        msg = (f"🔔 **Resultado Encontrado!**\n\n👤 Termo: {term}\n📄 Página: {item['pagina']}\n🔗 [Abrir Diário]({item['link']})")
-                        await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
-    logging.info("✅ Busca de termos finalizada.")
+            await processar_resultados(app, chat_id, term, resultados, "SERRA")
+    logging.info("✅ [SERRA] Busca finalizada.")
+
+# --- TAREFA ESPECÍFICA: VITÓRIA ---
+async def tarefa_busca_vitoria_pmv(app):
+    logging.info("🔎 [PMV-VITÓRIA] Iniciando busca no portal próprio...")
+    hoje = datetime.now().strftime("%d/%m/%Y")
+    subs = get_all_subscriptions()
+    
+    # Para Vitória (PMV), como é um PDF único, baixamos uma vez e testamos todos os termos
+    for sub in subs:
+        chat_id = sub['chat_id']
+        termos_usuario = sub['terms'] # Lista de nomes que o usuário vigia
+        
+        # Chamamos a busca passando a lista de nomes
+        resultados = buscar_vitoria_completo(hoje, termos_usuario)
+        
+        for res in resultados:
+            # Verifica se já notificamos esse termo nesta página hoje
+            identificador_unico = f"{res['link']}_{res['pagina']}_{res['termo']}"
+            if not ja_foi_notificado(chat_id, identificador_unico):
+                msg = (
+                    f"🔔 **Resultado Encontrado em VITÓRIA!**\n\n"
+                    f"👤 Termo: {res['termo']}\n"
+                    f"📄 Página: {res['pagina']}\n"
+                    f"🔗 [Abrir Diário Oficial](https://diariooficial.vitoria.es.gov.br/)"
+                )
+                await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+
+    logging.info("✅ [PMV-VITÓRIA] Busca finalizada.")
+
+# Mantenha a função auxiliar processar_resultados como está
+async def processar_resultados(app, chat_id, term, resultados, cidade):
+    if isinstance(resultados, list) and resultados:
+        for item in resultados:
+            if not ja_foi_notificado(chat_id, item['link']):
+                msg = (
+                    f"🔔 **Resultado Encontrado em {cidade}!**\n\n"
+                    f"👤 Termo: {term}\n"
+                    f"📄 Página: {item['pagina']}\n"
+                    f"🔗 [Abrir Diário]({item['link']})"
+                )
+                try:
+                    await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                except Exception as e:
+                    logging.error(f"Erro ao notificar {chat_id} ({cidade}): {e}")
 
 async def tarefa_resumo_diario(app):
     logging.info("📝 Iniciando resumo diário com Gemini...")
@@ -184,7 +243,9 @@ async def post_init(application):
 
     scheduler = AsyncIOScheduler()
     # Busca termos a cada 1 hora
-    #scheduler.add_job(tarefa_de_busca, 'interval', hours=0, minutes=1, args=[application])
+    # Teste apenas Vitória comentando a linha da Serra:
+    scheduler.add_job(tarefa_busca_serra, 'interval', minutes=2, args=[application])
+    scheduler.add_job(tarefa_busca_vitoria_pmv, 'interval', minutes=1, args=[application])
     # Resumo diário às 09:00 da manhã
     scheduler.add_job(tarefa_resumo_diario, 'cron', hour=12, minute=9, args=[application])
     

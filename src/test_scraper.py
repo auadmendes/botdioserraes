@@ -1,49 +1,46 @@
-import asyncio
 import httpx
-import json
+import asyncio
 from datetime import datetime
-import urllib.parse
 
-async def testar_busca(termo):
-    # Usando a data de hoje para o teste
-    hoje = datetime.now().strftime("%Y-%m-%d")
+# Configurações
+BASE_SEARCH_URL = "https://ioes.dio.es.gov.br/busca/busca/buscar/query/0"
+DATA_HOJE = "2026-04-10"
+
+async def buscar_texto_estado(termo):
+    print(f"🔎 Testando busca no ESTADO para: '{termo}'...")
     
-    # URL que identificamos no seu arquivo HAR
-    url = f"https://ioes.dio.es.gov.br/busca/busca/buscar/query/0/di:{hoje}/df:{hoje}/"
-    
+    date_filter = f"/di:{DATA_HOJE}/df:{DATA_HOJE}"
     params = {
         "1": "1",
         "q": f'"{termo}"',
-        "subtheme": "diariodaserra"
+        "subtheme": "diario_oficial"  # <--- ESTE É O SEGREDO!
     }
+    url = f"{BASE_SEARCH_URL}{date_filter}/"
 
-    print(f"🔎 Buscando por: {termo} na data {hoje}...")
-    
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, params=params, timeout=15.0)
-            
-            print(f"📡 Status Code: {response.status_code}")
-            
-            # Print do JSON bruto para ver a estrutura completa que o site retorna
-            dados = response.json()
-            print("📦 Resposta bruta do site:")
-            print(json.dumps(dados, indent=2)) # Isso organiza o JSON na tela
+            response = await client.get(url, params=params, timeout=10.0)
+            data = response.json()
+            total = data.get("hits", {}).get("total", 0)
 
-            if "hits" in dados and dados["hits"]["total"] > 0:
-                print(f"\n✅ SUCESSO: Encontrei {dados['hits']['total']} resultados!")
-                for hit in dados["hits"]["hits"]:
+            if total > 0:
+                print(f"✅ SUCESSO! Encontrados {total} resultados no Diário do Estado.")
+                for hit in data["hits"]["hits"]:
                     source = hit["_source"]
-                    print(f"---")
-                    print(f"Pagina: {source.get('pagina')}")
-                    print(f"Resumo: {hit.get('highlight', {}).get('texto', ['Sem resumo'])[0]}")
+                    # O ID do documento é o _id do hit
+                    doc_id = hit["_id"]
+                    pagina = source.get('pagina')
+                    
+                    print("-" * 30)
+                    print(f"📄 Página: {pagina}")
+                    # Link de visualização para o caderno Estadual
+                    print(f"🔗 Link: https://ioes.dio.es.gov.br/portal/edicoes/ver/{doc_id}/{pagina}")
             else:
-                print("\n❌ Nenhum resultado encontrado para hoje.")
+                print(f"❌ '{termo}' não encontrado no caderno do Estado hoje.")
 
         except Exception as e:
-            print(f"⚠️ Erro no teste: {e}")
+            print(f"⚠️ Erro: {e}")
 
-# Roda o teste
 if __name__ == "__main__":
-    termo_teste = "MARIA RANGEL DA SILVA" # Termo que você usou no print anterior
-    asyncio.run(testar_busca(termo_teste))
+    # Teste agora com o nome que vimos na imagem!
+    asyncio.run(buscar_texto_estado("FABIANE ANDRADE DE ASSIS"))

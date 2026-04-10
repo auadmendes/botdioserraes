@@ -90,3 +90,57 @@ def capturar_e_baixar_diario(data_alvo):
         print(f"Erro no Scraper: {e}")
     
     return None, None
+
+##
+
+async def check_term_vitoria(term):
+    """Busca termos específicos no Diário de Vitória"""
+    results = []
+    today = datetime.now().strftime("%Y-%m-%d")
+    date_filter = f"/di:{today}/df:{today}"
+    
+    params = {
+        "1": "1",
+        "q": f'"{term}"',
+        "subtheme": "vitoria" # <--- MUDANÇA AQUI
+    }
+    
+    url = f"{BASE_SEARCH_URL}{date_filter}/"
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, params=params, timeout=15.0)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("hits") and data["hits"].get("total", 0) > 0:
+                for hit in data["hits"]["hits"]:
+                    source = hit["_source"]
+                    edicao_id = source.get("edicao_id") or source.get("diario_id")
+                    pagina = source.get("pagina")
+                    termo_url = urllib.parse.quote(term)
+                    
+                    # Link de visualização específico para Vitória
+                    link_visualizacao = f"https://ioes.dio.es.gov.br/vitoria/ver/{edicao_id}/{pagina}/{termo_url}"
+                    
+                    resumo = ""
+                    if "highlight" in hit and "texto" in hit["highlight"]:
+                        resumo = hit["highlight"]["texto"][0].replace("<strong>", "*").replace("</strong>", "*")
+
+                    results.append({
+                        "data": f"{source['day']}/{source['month']}/{source['year']}",
+                        "link": link_visualizacao,
+                        "pagina": pagina,
+                        "resumo": resumo
+                    })
+            return results
+        except Exception as e:
+            print(f"⚠️ Erro ao buscar termo {term} em Vitória: {e}")
+            return []
+
+def capturar_diario_vitoria(data_alvo):
+    """Captura o PDF do Diário de Vitória para resumo de IA"""
+    url_vitoria = "https://ioes.dio.es.gov.br/vitoria" 
+    # Repita a lógica de download que usamos no scraper da Serra, 
+    # mas apontando para url_vitoria.
+    # O ID da edição de Vitória será diferente do da Serra.
