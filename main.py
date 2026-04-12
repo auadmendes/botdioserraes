@@ -3,9 +3,13 @@ import logging
 import os
 from datetime import datetime
 from telegram import BotCommand
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+
 from src.scraper_pmv import buscar_vitoria_completo
+from src.scraper_vv import buscar_vila_velha_completo
 
 
 from dotenv import load_dotenv
@@ -13,7 +17,7 @@ from dotenv import load_dotenv
 # Importações do seu projeto
 from src.database import (
     add_term, remove_term, get_all_subscriptions, 
-    ja_foi_notificado, get_user_terms, get_admin_stats,
+    ja_foi_notificado, get_user_terms, get_admin_stats, remove_user_term,
     salvar_resumo_no_banco, 
     buscar_resumo_por_data,    # <--- ADICIONE ESTA
     get_ultimas_datas_resumo   # <--- ADICIONE ESTA TAMBÉM
@@ -49,100 +53,379 @@ async def resposta_padrao(update, context):
 
 async def meus_termos(update, context):
     chat_id = update.effective_chat.id
-    termos = get_user_terms(chat_id) 
-    if termos:
-        termos_lista = "\n".join([f"• {t}" for t in termos])
-        await update.message.reply_text(f"📝 **Seus nomes monitorados:**\n\n{termos_lista}", parse_mode='Markdown')
-    else:
-        await update.message.reply_text("Você não tem nomes cadastrados. Use /monitorar [nome]")
+    termos = get_user_terms(chat_id)
 
+    if not termos:
+        await update.message.reply_text("Você não tem nomes monitorados.")
+        return
+
+    termos_lista = ""
+    for t in termos:
+        # Se for um dicionário (formato novo)
+        if isinstance(t, dict):
+            nome = t.get('nome', 'Sem nome').replace("*", "")
+            # Substituímos o sublinhado por espaço para o Telegram não achar que é itálico
+            cidade = t.get('cidade', 'SERRA').replace("_", " ")
+        else:
+            # Se ainda houver strings antigas no banco
+            nome = str(t).replace("*", "")
+            cidade = "SERRA"
+            
+        termos_lista += f"• **{nome}** ({cidade})\n"
+
+    # Se a lista estiver vazia por algum erro de processamento
+    if not termos_lista:
+        termos_lista = "Nenhum termo processado."
+
+    await update.message.reply_text(
+        f"📝 **Seus nomes monitorados:**\n\n{termos_lista}", 
+        parse_mode='Markdown'
+    )
+
+# Comando para remover um termo específico
+# 1. O Comando principal /remover
 async def remover(update, context):
     chat_id = update.effective_chat.id
-    termo = " ".join(context.args).strip()
-    if not termo:
-        await update.message.reply_text("⚠️ Exemplo: `/remover Maria Rangel`", parse_mode='Markdown')
+    args = context.args
+
+    # CASO 1: /remover NOME CIDADE (Ex: /remover ELENA SERRA)
+    if len(args) >= 2:
+        cidade = args[-1].upper()
+        nome = " ".join(args[:-1]).upper()
+        if remove_user_term(chat_id, nome, cidade):
+            await update.message.reply_text(f"✅ Termo **{nome}** ({cidade}) removido!")
+        else:
+            await update.message.reply_text("❌ Não encontrei esse termo nessa cidade.")
         return
-    if remove_term(chat_id, termo):
-        await update.message.reply_text(f"✅ Removido com sucesso: **{termo}**")
+
+    # CASO 2: /remover NOME (Ex: /remover ELENA)
+    if len(args) == 1:
+        nome = args[0].upper()
+        await mostrar_botoes_cidade_remocao(update, nome)
+        return
+
+    # CASO 3: /remover (Sem argumentos)
+    await update.message.reply_text("🤔 Qual nome você deseja remover da sua lista?")
+    context.user_data['esperando_nome_remocao'] = True
+
+async def mostrar_botoes_cidade_remocao(update, nome_digitado):
+    chat_id = update.effective_chat.id
+    termos_do_banco = get_user_terms(chat_id)
+    # O que o usuário digitou limpo para comparação
+    nome_search = nome_digitado.upper().strip().replace("*", "")
+
+    # Lista para armazenar dicionários com {cidade, nome_original_no_banco}
+    opcoes_encontradas = []
+    
+    for t in termos_do_banco:
+        nome_original = ""
+        cidade_original = ""
+        
+        if isinstance(t, dict):
+            nome_original = t.get('nome', '')
+            cidade_original = t.get('cidade', 'SERRA')
+        else:
+            nome_original = str(t)
+            cidade_original = "SERRA"
+
+        # Comparamos o nome do banco (sem asteriscos) com a busca
+        if nome_original.upper().replace("*", "").strip() == nome_search:
+            opcoes_encontradas.append({
+                "cidade": cidade_original,
+                "nome_real": nome_original # Mantemos os asteriscos aqui para o delete
+            })
+
+    if not opcoes_encontradas:
+        await update.message.reply_text(f"❌ O nome **{nome_digitado}** não foi encontrado na sua lista.")
+        return
+
+    # Criamos os botões
+    keyboard = []
+    for opcao in opcoes_encontradas:
+        nome_real = opcao['nome_real']
+        cid = opcao['cidade']
+        # O callback_data envia o nome real (com asterisco se tiver) para a remoção no banco funcionar
+        keyboard.append([
+            InlineKeyboardButton(
+                f"Remover de {cid}", 
+                callback_data=f"DEL:{nome_real}:{cid}"
+            )
+        ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"🗑 Encontrei **{nome_search}** em {len(opcoes_encontradas)} cidade(s).\nQual deseja remover?",
+        reply_markup=reply_markup
+    )
+
+async def callback_remover(update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    # O dado vem do botão: "DEL:NOME:CIDADE"
+    data = query.data.split(":")
+    if len(data) < 3:
+        await query.edit_message_text("❌ Erro ao processar remoção.")
+        return
+        
+    nome = data[1]
+    cidade = data[2]
+    chat_id = update.effective_chat.id
+
+    # Chama o banco (que usa collection.update_one)
+    if remove_user_term(chat_id, nome, cidade):
+        await query.edit_message_text(f"✅ Sucesso! **{nome}** ({cidade}) foi removido.")
     else:
-        await update.message.reply_text(f"❓ Não encontrei '{termo}' na sua lista.")
+        await query.edit_message_text(f"❌ Termo não encontrado ou já removido.")
+
+# 2. Handler para quando o usuário clicar no botão de confirmação da remoção
+async def callback_remover(update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    # Formato do data: "DEL:NOME:CIDADE"
+    _, nome, cidade = query.data.split(":")
+    chat_id = update.effective_chat.id
+
+    if remove_user_term(chat_id, nome, cidade):
+        await query.edit_message_text(f"✅ Sucesso! **{nome}** ({cidade}) foi removido.")
+    else:
+        await query.edit_message_text(f"❌ Erro: O termo **{nome}** não estava cadastrado em {cidade}.")
+
+# 3. Ajuste no MessageHandler para capturar o nome se ele digitar sozinho
+async def resposta_padrao(update, context):
+    chat_id = update.effective_chat.id
+    texto = update.message.text.upper().strip()
+
+    # Se o bot estiver esperando um nome para remover
+    if context.user_data.get('esperando_nome_remocao'):
+        context.user_data['esperando_nome_remocao'] = False
+        # Redireciona para a lógica de escolher a cidade
+        context.args = [texto]
+        await remover(update, context)
+        return
+
+    # ... seu código atual de resposta_padrao continua aqui embaixo ...
+
 
 async def monitorar(update, context):
-    term = " ".join(context.args).strip()
-    if term:
-        add_term(update.effective_chat.id, update.effective_user.username, term)
-        await update.message.reply_text(f"✅ Agora estou vigiando: **{term}**")
+    termo = " ".join(context.args).strip()
+    if not termo:
+        await update.message.reply_text("❌ Exemplo: `/monitorar MARIA RANGEL`", parse_mode='Markdown')
+        return
+
+    # Guarda o termo temporariamente no contexto do usuário
+    context.user_data['termo_pendente'] = termo
+
+    # Cria os botões
+    keyboard = [
+        [
+            InlineKeyboardButton("Serra", callback_data='SERRA'),
+            InlineKeyboardButton("Vitória", callback_data='VITORIA')
+        ],
+        [
+            InlineKeyboardButton("Vila Velha", callback_data='VILA_VELHA'),
+            InlineKeyboardButton("Cariacica", callback_data='CARIACICA')
+        ],
+        [InlineKeyboardButton("🌍 Todos os Diários", callback_data='TODOS')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"🔍 Onde você deseja monitorar o termo **{termo}**?",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+# Função que captura o clique no botão
+async def callback_monitorar(update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    cidade = query.data
+    termo = context.user_data.get('termo_pendente')
+    chat_id = update.effective_chat.id
+    username = update.effective_user.username
+
+    if termo:
+        add_term(chat_id, username, termo, cidade)
+        await query.edit_message_text(
+            text=f"✅ Sucesso! Agora vigiando **{termo}** em **{cidade}**."
+        )
     else:
-        await update.message.reply_text("❌ Exemplo: /monitorar MARIA RANGEL")
+        await query.edit_message_text(text="❌ Erro na sessão. Tente /monitorar novamente.")
 
 async def som(update, context):
     await update.message.reply_text("🔔 Testando som...", disable_notification=False)
 
 async def stats(update, context):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Acesso negado.")
         return
-    total_users, total_alerts, top_terms = get_admin_stats()
-    texto_top = "\n".join([f"🔥 {t['_id']}: {t['count']}" for t in top_terms])
-    mensagem = (f"📊 **Estatísticas**\n\n👥 Usuários: `{total_users}`\n🔔 Alertas: `{total_alerts}`\n\n🔝 **Top Termos:**\n{texto_top}")
-    await update.message.reply_text(mensagem, parse_mode='Markdown')
 
-# --- TAREFAS AGENDADAS (JOBS) ---
+    try:
+        total_users, total_alerts, top_terms = get_admin_stats()
+        
+        linhas_top = []
+        for t in top_terms:
+            raw_id = t['_id']
+            
+            # Se o ID for um dicionário (formato novo), pegamos apenas o campo 'nome'
+            if isinstance(raw_id, dict):
+                nome_base = raw_id.get('nome', 'Sem Nome')
+            else:
+                # Se for string (formato antigo)
+                nome_base = str(raw_id)
+            
+            # Limpa caracteres que quebram o Markdown do Telegram
+            nome_limpo = nome_base.replace("*", "").replace("_", " ")
+            linhas_top.append(f"🔥 {nome_limpo}: `{t['count']}`")
+        
+        texto_top = "\n".join(linhas_top) if linhas_top else "Nenhum termo relevante."
 
-# async def tarefa_de_busca(app):
-#     """Busca os nomes específicos de cada usuário"""
-#     logging.info("🔎 Iniciando busca de termos...")
-#     subs = get_all_subscriptions()
-#     for sub in subs:
-#         chat_id = sub['chat_id']
-#         for term in sub['terms']:
-#             resultados = await check_term_ioes(term)
-#             if isinstance(resultados, list):
-#                 for item in resultados:
-#                     if not ja_foi_notificado(chat_id, item['link']):
-#                         msg = (f"🔔 **Resultado Encontrado!**\n\n👤 Termo: {term}\n📄 Página: {item['pagina']}\n🔗 [Abrir Diário]({item['link']})")
-#                         await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
-#     logging.info("✅ Busca de termos finalizada.")
-
+        mensagem = (
+            "📊 **Estatísticas Reais**\n\n"
+            f"👥 Usuários: `{total_users}`\n"
+            f"🔔 Alertas Enviados: `{total_alerts}`\n\n"
+            "🔝 **Top Termos:**\n"
+            f"{texto_top}"
+        )
+        await update.message.reply_text(mensagem, parse_mode='Markdown')
+        
+    except Exception as e:
+        logging.error(f"Erro ao exibir stats: {e}")
+        await update.message.reply_text("❌ Erro técnico ao processar estatísticas.")
 
 # --- TAREFA ESPECÍFICA: SERRA ---
 async def tarefa_busca_serra(app):
     logging.info("🔎 [SERRA] Iniciando busca de termos...")
     subs = get_all_subscriptions()
+    
     for sub in subs:
         chat_id = sub['chat_id']
-        for term in sub['terms']:
-            resultados = await check_term_ioes(term)
-            await processar_resultados(app, chat_id, term, resultados, "SERRA")
-    logging.info("✅ [SERRA] Busca finalizada.")
+        for t in sub['terms']:
+            # Lógica para separar o texto do dicionário
+            if isinstance(t, dict):
+                termo_para_busca = t['nome']
+                cidade_do_termo = t.get('cidade', 'SERRA')
+            else:
+                termo_para_busca = t
+                cidade_do_termo = 'SERRA'
+
+            # Só busca se for Serra ou Todos
+            if cidade_do_termo in ['SERRA', 'TODOS']:
+                # MUITO IMPORTANTE: Passar apenas termo_para_busca
+                resultados = await check_term_ioes(termo_para_busca) 
+                await processar_resultados(app, chat_id, termo_para_busca, resultados, "SERRA")
 
 # --- TAREFA ESPECÍFICA: VITÓRIA ---
 async def tarefa_busca_vitoria_pmv(app):
-    logging.info("🔎 [PMV-VITÓRIA] Iniciando busca no portal próprio...")
+    logging.info("🔎 [PMV-VITÓRIA] Iniciando busca otimizada...")
     hoje = datetime.now().strftime("%d/%m/%Y")
-    subs = get_all_subscriptions()
     
-    # Para Vitória (PMV), como é um PDF único, baixamos uma vez e testamos todos os termos
+    # 1. Pegamos todos os usuários
+    subs = get_all_subscriptions()
+    if not subs:
+        return
+
+    # 2. Criamos uma lista ÚNICA de todos os nomes que precisam ser buscados em Vitória
+    # Isso evita baixar o PDF várias vezes.
+    todos_termos_vitoria = set()
+    for sub in subs:
+        for t in sub['terms']:
+            # Verifica se o termo é para Vitoria ou para Todos
+            if t['cidade'] in ['VITORIA', 'TODOS']:
+                todos_termos_vitoria.add(t['nome'])
+
+    if not todos_termos_vitoria:
+        logging.info("ℹ️ Nenhum termo cadastrado para Vitória hoje.")
+        return
+
+    # 3. Baixamos o PDF UMA ÚNICA VEZ e buscamos todos os termos de uma vez
+    # Convertemos o set em lista para o scraper
+    resultados_globais = buscar_vitoria_completo(hoje, list(todos_termos_vitoria))
+
+    if not resultados_globais:
+        logging.info("✅ [PMV-VITÓRIA] Busca finalizada: Nenhum termo encontrado no PDF.")
+        return
+
+    # 4. Agora distribuímos os resultados para os usuários certos
     for sub in subs:
         chat_id = sub['chat_id']
-        termos_usuario = sub['terms'] # Lista de nomes que o usuário vigia
+        termos_deste_usuario = [t['nome'] for t in sub['terms'] if t['cidade'] in ['VITORIA', 'TODOS']]
         
-        # Chamamos a busca passando a lista de nomes
-        resultados = buscar_vitoria_completo(hoje, termos_usuario)
-        
-        for res in resultados:
-            # Verifica se já notificamos esse termo nesta página hoje
-            identificador_unico = f"{res['link']}_{res['pagina']}_{res['termo']}"
-            if not ja_foi_notificado(chat_id, identificador_unico):
-                msg = (
-                    f"🔔 **Resultado Encontrado em VITÓRIA!**\n\n"
-                    f"👤 Termo: {res['termo']}\n"
-                    f"📄 Página: {res['pagina']}\n"
-                    f"🔗 [Abrir Diário Oficial](https://diariooficial.vitoria.es.gov.br/)"
-                )
-                await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+        for res in resultados_globais:
+            # Se o resultado encontrado pertence a este usuário
+            if res['termo'] in termos_deste_usuario:
+                identificador_unico = f"{res['link']}_{res['pagina']}_{res['termo']}"
+                
+                if not ja_foi_notificado(chat_id, identificador_unico):
+                    msg = (
+                        f"🔔 **Resultado Encontrado em VITÓRIA!**\n\n"
+                        f"👤 Termo: {res['termo']}\n"
+                        f"📄 Página: {res['pagina']}\n"
+                        f"🔗 [Abrir Diário Oficial](https://diariooficial.vitoria.es.gov.br/)"
+                    )
+                    try:
+                        await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                    except Exception as e:
+                        logging.error(f"Erro ao enviar para {chat_id}: {e}")
 
-    logging.info("✅ [PMV-VITÓRIA] Busca finalizada.")
+    logging.info("✅ [PMV-VITÓRIA] Busca e notificações finalizadas.")
+
+# --- TAREFA ESPECÍFICA: VILA VELHA ---
+async def tarefa_busca_vila_velha(app):
+    logging.info("🔎 [VILA VELHA] Iniciando busca na última edição...")
+    subs = get_all_subscriptions()
+    if not subs: return
+
+    todos_termos_vv = set()
+    for sub in subs:
+        for t in sub['terms']:
+            if isinstance(t, dict):
+                if t.get('cidade') in ['VILA_VELHA', 'TODOS']:
+                    todos_termos_vv.add(t['nome'])
+            elif isinstance(t, str):
+                # Para termos antigos, buscamos em todos por segurança
+                todos_termos_vv.add(t.upper())
+
+    if not todos_termos_vv:
+        return
+
+    # Chama o scraper
+    resultados_globais = buscar_vila_velha_completo(list(todos_termos_vv))
+
+    for sub in subs:
+        chat_id = sub['chat_id']
+        
+        # Filtra os termos deste usuário específico de forma segura
+        termos_usuario = []
+        for t in sub['terms']:
+            if isinstance(t, dict):
+                if t.get('cidade') in ['VILA_VELHA', 'TODOS']:
+                    termos_usuario.append(t['nome'])
+            elif isinstance(t, str):
+                termos_usuario.append(t.upper())
+
+        for res in resultados_globais:
+            if res['termo'] in termos_usuario:
+                # Criamos um identificador único com a data para não repetir o alerta hoje
+                data_hoje = datetime.now().strftime('%Y-%m-%d')
+                identificador = f"VV_{res['termo']}_{res['pagina']}_{data_hoje}"
+                
+                if not ja_foi_notificado(chat_id, identificador):
+                    msg = (
+                        f"🔔 **Resultado Encontrado em VILA VELHA!**\n\n"
+                        f"👤 Termo: {res['termo']}\n"
+                        f"📄 Página: {res['pagina']}\n"
+                        f"🔗 [Abrir Portal Vila Velha]({res['link']})"
+                    )
+                    try:
+                        await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                    except Exception as e:
+                        logging.error(f"Erro ao notificar chat {chat_id}: {e}")
+
+    logging.info("✅ [VILA VELHA] Busca finalizada.")
 
 # Mantenha a função auxiliar processar_resultados como está
 async def processar_resultados(app, chat_id, term, resultados, cidade):
@@ -231,38 +514,41 @@ async def consultar_resumo(update, context):
 # --- INICIALIZAÇÃO ---
 
 async def post_init(application):
-    # Configura o Menu de Comandos
-    await application.bot.set_my_commands([
-        BotCommand("monitorar", "Vigiar um nome"),
-        BotCommand("meustermos", "Ver meus nomes"),
-        BotCommand("remover", "Parar de vigiar"),
-        BotCommand("resumo", "Buscar resumo por data"),
-        BotCommand("som", "Testar som"),
-        BotCommand("stats", "Admin Stats")
-    ])
+    # ... (seu código de set_my_commands continua igual)
 
     scheduler = AsyncIOScheduler()
-    # Busca termos a cada 1 hora
-    # Teste apenas Vitória comentando a linha da Serra:
-    scheduler.add_job(tarefa_busca_serra, 'interval', minutes=2, args=[application])
-    scheduler.add_job(tarefa_busca_vitoria_pmv, 'interval', minutes=1, args=[application])
-    # Resumo diário às 09:00 da manhã
-    scheduler.add_job(tarefa_resumo_diario, 'cron', hour=12, minute=9, args=[application])
+
+    # TAREFAS AGENDADAS COM CRON
+    
+# Se agora são 17:52, teste com 17:55 para dar tempo de iniciar
+    scheduler.add_job(tarefa_busca_serra, 'cron', hour=10, minute=48, args=[application])
+    scheduler.add_job(tarefa_busca_vitoria_pmv, 'cron', hour=10, minute=55, args=[application])
+    scheduler.add_job(tarefa_busca_vila_velha, 'cron', hour=11, minute=1, args=[application])
     
     scheduler.start()
-    logging.info("⏰ Scheduler iniciado.")
+    logging.info("⏰ Scheduler iniciado no modo CRON (Horários fixos).")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
 
-    # Handlers
+    # --- 1. COMANDOS ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("monitorar", monitorar))
     app.add_handler(CommandHandler("meustermos", meus_termos))
-    app.add_handler(CommandHandler("resumo", consultar_resumo))
     app.add_handler(CommandHandler("remover", remover))
+    app.add_handler(CommandHandler("resumo", consultar_resumo))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("som", som))
+
+    # --- 2. CALLBACKS DE BOTÕES (ORDEM É CRÍTICA) ---
+    
+    # Primeiro: Trata botões de REMOVER (que começam com DEL:)
+    app.add_handler(CallbackQueryHandler(callback_remover, pattern="^DEL:"))
+
+    # Segundo: Trata botões de MONITORAR (Cidades puras)
+    app.add_handler(CallbackQueryHandler(callback_monitorar, pattern="^(SERRA|VITORIA|VILA_VELHA|CARIACICA|TODOS)$"))
+
+    # --- 3. MENSAGENS DE TEXTO (SEMPRE POR ÚLTIMO) ---
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), resposta_padrao))
 
     logging.info("🚀 Bot iniciando...")
