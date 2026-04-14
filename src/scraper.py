@@ -1,3 +1,4 @@
+from flask import logging
 import httpx
 from datetime import datetime
 import urllib.parse
@@ -54,40 +55,84 @@ async def check_term_ioes(term):
             return []
 
 # --- FUNÇÃO 2: DOWNLOAD DO DIÁRIO COMPLETO (RESUMO IA) ---
-def capturar_e_baixar_diario(data_alvo):
-    data_limpa = data_alvo.replace("/", "-")
-    diretorio_atual = os.path.dirname(os.path.abspath(__file__))
-    caminho_projeto = os.path.abspath(os.path.join(diretorio_atual, ".."))
-    caminho_arquivo = os.path.join(caminho_projeto, f"diario_{data_limpa}.pdf")
-    
-    url_base = "https://ioes.dio.es.gov.br/diariodaserra" 
-    
-    try:
-        response = requests.get(url_base, timeout=15)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        link_tag = soup.find('a', id='baixar-diario-completo')
-        
-        # Tenta pegar o ID dinâmico
-        edicao_id = "0"
-        if link_tag and 'href' in link_tag.attrs:
-            edicao_id = link_tag['href'].split('/')[-1]
-        
-        # FORÇA O ID DE HOJE SE VIER ZERO (Segurança para 10/04/2026)
-        if edicao_id == "0" and data_alvo == "10/04/2026":
-            edicao_id = "11046"
+import logging # Garante o import correto no topo do arquivo
 
-        download_url = f"https://ioes.dio.es.gov.br/portal/edicoes/download/{edicao_id}"
-        print(f"DEBUG SCRAPER: Baixando edição {edicao_id}")
+def capturar_e_baixar_diario(data_alvo):
+    try:
+        # 1. Preparação de caminhos e nomes
+        data_limpa = data_alvo.replace("/", "-")
+        print(f"📅 Data Alvo: {data_alvo} | Data Limpa: {data_limpa}")
         
-        pdf_res = requests.get(download_url)
-        # Verifica se o conteúdo é grande o suficiente para ser um PDF (página de erro tem ~2kb)
-        if pdf_res.status_code == 200 and len(pdf_res.content) > 10000:
-            with open(caminho_arquivo, 'wb') as f:
-                f.write(pdf_res.content)
-            return caminho_arquivo, download_url
-                
+        diretorio_atual = os.path.dirname(os.path.abspath(__file__))
+        print(f"📂 Diretório Atual do Script: {diretorio_atual}")
+        # Caminho para salvar o arquivo na raiz do projeto
+        caminho_projeto = os.path.abspath(os.path.join(diretorio_atual, ".."))
+        print(f"📁 Caminho do Projeto: {caminho_projeto}")
+        caminho_arquivo = os.path.join(caminho_projeto, f"diario_{data_limpa}.pdf")
+        print(f"📄 Caminho Completo para Salvar o PDF: {caminho_arquivo}")
+        
+        # 2. Requisição para a API do IOES
+        url_api = "https://ioes.dio.es.gov.br/apifront/portal/edicoes/ultimas_edicoes/diariodaserra"
+        print(f"🔗 URL da API: {url_api}")
+        
+        response = requests.get(url_api, timeout=15)
+        print(f"📊 Status da Resposta: {response.status_code}")
+        
+        edicoes = response.json()
+        print(f"📦 Tipo de Dados Recebidos: {type(edicoes)}")
+
+        edicao_id = None
+
+        # --- LÓGICA DE EXTRAÇÃO DO ID ---
+
+        # CASO A: API retornou um Dicionário direto (Formato atual)
+        if isinstance(edicoes, dict):
+            print(f"📦 API retornou um dicionário. Chaves: {list(edicoes.keys())}")
+            edicao_id = edicoes.get('id') or edicoes.get('ID') or edicoes.get('edicao_id')
+            print(f"🔍 ID Encontrado no topo do dicionário: {edicao_id}")
+            
+            # Se o ID não estiver no topo, procura se existe uma lista dentro do dicionário
+            if not edicao_id:
+                print("🔍 ID não encontrado no topo do dicionário. Verificando listas internas...")
+                for chave in edicoes.keys():
+                    if isinstance(edicoes[chave], list) and len(edicoes[chave]) > 0:
+                        item = edicoes[chave][0]
+                        if isinstance(item, dict):
+                            edicao_id = item.get('id')
+                            break
+
+        # CASO B: API retornou uma Lista (Formato antigo/alternativo)
+        elif isinstance(edicoes, list) and len(edicoes) > 0:
+            print(f"📄 API retornou uma lista com {len(edicoes)} itens.")
+            item = edicoes[0]
+            if isinstance(item, dict):
+                edicao_id = item.get('id') or item.get('ID') or item.get('edicao_id')
+            else:
+                edicao_id = item
+
+        print(f"🔍 ID Final Identificado: {edicao_id}")
+
+        # 3. Download do PDF se o ID foi encontrado
+        if edicao_id:
+            download_url = f"https://ioes.dio.es.gov.br/portal/edicoes/download/{edicao_id}"
+            print(f"🚀 Tentando baixar PDF do ID: {edicao_id}")
+            
+            pdf_res = requests.get(download_url, timeout=60)
+            print(f"📊 Status do Download: {pdf_res.status_code} | Tamanho do Conteúdo: {len(pdf_res.content)} bytes")
+            
+            # Verifica se o download foi bem sucedido e se o conteúdo parece um PDF
+            if pdf_res.status_code == 200 and len(pdf_res.content) > 1000:
+                with open(caminho_arquivo, 'wb') as f:
+                    f.write(pdf_res.content)
+                print(f"✅ ARQUIVO SALVO COM SUCESSO: {len(pdf_res.content)} bytes")
+                return caminho_arquivo, download_url
+            else:
+                print(f"❌ Resposta de download inválida. Status: {pdf_res.status_code}")
+        else:
+            print("⚠️ Não foi possível localizar o edicao_id nos dados recebidos.")
+        
     except Exception as e:
-        print(f"Erro no Scraper: {e}")
+        print(f"❌ Erro Crítico no Scraper: {e}")
     
     return None, None
 

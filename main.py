@@ -447,31 +447,53 @@ async def tarefa_resumo_diario(app):
     logging.info("📝 Iniciando resumo diário com Gemini...")
     hoje = datetime.now().strftime("%d/%m/%Y")
     
-    # Recebe os dois valores do scraper
+    # 1. Faz o download do diário da Serra
+    # Certifique-se de que esta função retorna (caminho, link) ou (None, None)
     caminho_pdf, link_pdf = capturar_e_baixar_diario(hoje) 
 
     if caminho_pdf and link_pdf:
-        # Envia os dois valores para a IA
-        resumo = await gerar_resumo_diario(caminho_pdf, link_pdf)
-        
-        # Opcional: Salvar no banco se você quiser usar o comando /resumo depois
-        from src.database import salvar_resumo_no_banco
-        salvar_resumo_no_banco(hoje, resumo)
+        try:
+            # 2. IA analisa e gera o texto
+            resumo = await gerar_resumo_diario(caminho_pdf, link_pdf)
+            
+            # 3. Salva no banco de dados para consultas futuras via /resumo
+            # Mesmo que o envio falhe, o dado estará seguro no MongoDB
+            salvar_resumo_no_banco(hoje, resumo)
 
-        subs = get_all_subscriptions()
-        for sub in subs:
-            try:
-                await app.bot.send_message(
-                    chat_id=sub['chat_id'],
-                    text=f"☀️ BOM DIA! RESUMO DA SERRA ({hoje})\n\n{resumo}"
-                    # Remova a linha do parse_mode aqui!
-                )
-            except Exception as e:
-                logging.error(f"Erro ao enviar resumo para {sub['chat_id']}: {e}")
+            # 4. Envia para todos os inscritos
+            subs = get_all_subscriptions()
+            for sub in subs:
+                chat_id = sub['chat_id']
+                try:
+                    # TENTATIVA 1: Enviar com formatação HTML (Mais robusto que Markdown)
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"☀️ <b>RESUMO DIÁRIO ({hoje})</b>\n\n{resumo}",
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logging.warning(f"⚠️ Falha no HTML para {chat_id}, enviando texto puro. Erro: {e}")
+                    # TENTATIVA 2: Plano B - Enviar sem formatação nenhuma (Blindado contra erros de parse)
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"☀️ RESUMO DIÁRIO ({hoje})\n\n{resumo}"
+                    )
+            
+        except Exception as e:
+            logging.error(f"❌ Erro processar resumo/IA: {e}")
         
+        # 5. Limpa o arquivo temporário para não encher o disco
         if os.path.exists(caminho_pdf):
-            os.remove(caminho_pdf)
-    logging.info("✅ Resumo diário finalizado.")
+            try:
+                os.remove(caminho_pdf)
+                logging.info(f"🗑️ Arquivo temporário removido: {caminho_pdf}")
+            except Exception as e:
+                logging.error(f"Erro ao deletar PDF: {e}")
+            
+    else:
+        logging.info(f"⚠️ Nenhum diário oficial encontrado para resumir em {hoje}")
+
+    logging.info("✅ Processo de resumo diário finalizado.")
 
 # --- FUNÇÕES AUXILIARES ---
 async def consultar_resumo(update, context):
@@ -521,15 +543,30 @@ async def post_init(application):
     # TAREFAS AGENDADAS COM CRON
     
 # Se agora são 17:52, teste com 17:55 para dar tempo de iniciar
-    scheduler.add_job(tarefa_busca_serra, 'cron', hour=10, minute=48, args=[application])
-    scheduler.add_job(tarefa_busca_vitoria_pmv, 'cron', hour=10, minute=55, args=[application])
-    scheduler.add_job(tarefa_busca_vila_velha, 'cron', hour=11, minute=1, args=[application])
+    scheduler.add_job(tarefa_busca_serra, 'cron', hour=9, minute=47, args=[application])
+    scheduler.add_job(tarefa_busca_vitoria_pmv, 'cron', hour=9, minute=5, args=[application])
+    scheduler.add_job(tarefa_busca_vila_velha, 'cron', hour=9, minute=10, args=[application])
     
+    # O resumo diário é mais pesado, então deixamos para um horário com menos tráfego, como 9:25
+    scheduler.add_job(tarefa_resumo_diario, 'cron', hour=13, minute=19, args=[application])
+    
+
+
     scheduler.start()
     logging.info("⏰ Scheduler iniciado no modo CRON (Horários fixos).")
 
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    # Criamos o app com timeouts estendidos para evitar o erro de "Timed out"
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .read_timeout(60)     # Tempo lendo resposta do Telegram
+        .write_timeout(60)    # Tempo enviando dados (mensagens longas)
+        .connect_timeout(60)  # Tempo tentando conectar
+        .pool_timeout(60)     # Tempo aguardando conexões no pool
+        .post_init(post_init)
+        .build()
+    )
 
     # --- 1. COMANDOS ---
     app.add_handler(CommandHandler("start", start))
@@ -551,5 +588,5 @@ if __name__ == '__main__':
     # --- 3. MENSAGENS DE TEXTO (SEMPRE POR ÚLTIMO) ---
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), resposta_padrao))
 
-    logging.info("🚀 Bot iniciando...")
+    logging.info("🚀 Bot iniciando com timeouts estendidos (60s)...")
     app.run_polling()
